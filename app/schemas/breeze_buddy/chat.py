@@ -7,9 +7,9 @@ analytics over voice + chat use the same field semantics.
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from app.ai.voice.agents.breeze_buddy.template.ui_catalog import ActionUnion, Icon
 
@@ -125,8 +125,9 @@ class ChatSession(BaseModel):
     ended_reason: Optional[ChatEndedReason] = None
     feedback: Optional[Dict[str, Any]] = Field(
         None,
-        description="End-of-chat card answer (migration 086): pills, comment, "
-        "trigger, at; or skipped, trigger, at. None = not asked yet.",
+        description="End-of-chat card (migration 086): {status: answered, "
+        "selected_pills, comment, shown_on, at} or {status: skipped, shown_on, "
+        "at}. None = not asked yet.",
     )
 
 
@@ -866,6 +867,65 @@ class UpdateWidgetContextResponse(BaseModel):
     revision: Optional[int] = Field(
         None, description="Echo of the applied revision, if one was sent."
     )
+    show_feedback_card: bool = Field(
+        False,
+        description="True when this push matches one of the template's "
+        "feedback events and the chat has not been asked yet (answered or "
+        "skipped): the widget shows the card.",
+    )
+
+
+class MessageFeedbackRequest(BaseModel):
+    """Body of ``POST /widget/session/{id}/messages/{idx}/feedback``."""
+
+    rating: Optional[Literal["up", "down"]] = Field(
+        ..., description="'up' / 'down', or null to clear the rating."
+    )
+
+
+class MessageFeedbackResponse(BaseModel):
+    session_id: str
+    idx: int
+    feedback: Optional[Dict[str, Any]] = None
+
+
+#: A pill id as the template stores it (same rule as ``FeedbackPill.id``).
+FeedbackPillId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9_]{1,40}$")]
+
+
+class ChatFeedbackRequest(BaseModel):
+    """Body of ``POST /widget/session/{id}/feedback`` (the end-of-chat card).
+
+    ``status`` says what happened: ``answered`` (pills and/or a comment) or
+    ``skipped`` (nothing else). A skip that carries pills or a comment is
+    refused here, so the two can never be mixed.
+    """
+
+    status: Literal["answered", "skipped"] = Field(
+        ..., description="'answered', or 'skipped' when the customer dismissed it."
+    )
+    selected_pills: List[FeedbackPillId] = Field(
+        default_factory=list,
+        max_length=6,
+        description="Ids of the chosen pills, from the template's feedback.pills.",
+    )
+    comment: Optional[str] = Field(None, max_length=1000)
+    shown_on: Optional[Literal["event", "new_chat", "ended"]] = Field(
+        None,
+        description="What showed the card: a page event, New chat, or the "
+        "chat ended for inactivity (asked on the next open).",
+    )
+
+    @model_validator(mode="after")
+    def _skip_has_no_answer(self):
+        if self.status == "skipped" and (self.selected_pills or self.comment):
+            raise ValueError("a skipped card carries no selected_pills or comment")
+        return self
+
+
+class ChatFeedbackResponse(BaseModel):
+    session_id: str
+    feedback: Dict[str, Any]
 
 
 class WidgetVoiceConnectResponse(BaseModel):
@@ -981,6 +1041,21 @@ class WidgetSessionStateResponse(BaseModel):
             "Unexpired PENDING HITL tool approvals for this session, oldest "
             "first, so the embed can repaint approval cards after a reload. "
             "Empty when nothing is awaiting a decision."
+        ),
+    )
+    chat_feedback: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "The end card answer or skip, if any — the embed does not ask "
+            "again. Per-reply ratings ride on each message."
+        ),
+    )
+    chat_end_reason: Optional[ChatEndedReason] = Field(
+        None,
+        description=(
+            "Why an ENDED session ended. 'idle_timeout' with no feedback and "
+            "a customer message means the embed may ask about this chat on "
+            "the next open."
         ),
     )
 
