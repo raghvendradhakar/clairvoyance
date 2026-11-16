@@ -44,6 +44,7 @@ from app.ai.voice.agents.breeze_buddy.chat.steps.labels import (
     resolve_step_status,
     summarize_step_result,
 )
+from app.ai.voice.agents.breeze_buddy.guardrails.guard import turn_tool_data
 from app.ai.voice.agents.breeze_buddy.mcp import (
     close_mcp_pool,
 )
@@ -110,6 +111,9 @@ class ApprovalTurnMixin:
         # idempotency hashes. The approved call itself replays the stored
         # args (original turn's hash) — intentional, it IS that operation.
         self._turn_id = uuid.uuid4().hex
+        if self._guard is not None:
+            # No new shopper message: only the output check runs.
+            self._guard.begin_turn(history, "")
         try:
             async for event in self._run_approval_turn_inner(
                 approval=approval,
@@ -123,6 +127,8 @@ class ApprovalTurnMixin:
             ):
                 yield event
         finally:
+            if self._guard is not None:
+                self._guard.schedule_result_write(self._turn_id)
             if self.aiohttp_session is not None:
                 await self.aiohttp_session.close()
                 self.aiohttp_session = None
@@ -151,6 +157,7 @@ class ApprovalTurnMixin:
         context = self._seed_resume_context(
             node, history, prep.global_funcs, kb_message=kb_message
         )
+        turn_start = len(context.get_messages())  # approved result and later
 
         yield SSEEvent(
             event="function_approval_resolved",
@@ -334,8 +341,12 @@ class ApprovalTurnMixin:
             )
             return
 
-        async for event in self._cycle_loop(
-            context, node, prep, first_cycle_fast=False
+        async for event in self._guarded(
+            self._cycle_loop(context, node, prep, first_cycle_fast=False),
+            node.get("name"),
+            lambda: turn_tool_data(
+                context.get_messages(), prep.tool_projection, turn_start
+            ),
         ):
             yield event
 

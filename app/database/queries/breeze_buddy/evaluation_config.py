@@ -1,7 +1,8 @@
 """SQL for per-template evaluation configuration.
 
 An agent can have many CONVERSATION_EVALS rows, each named, and one TOPIC row
-(always named 'topic'). The per-type endpoints address the row named after
+(always named 'topic'). GUARDRAIL rows run on the live chat turn, so the
+post-conversation queries below skip them. The per-type endpoints address the row named after
 their type (``lower(evaluation_type)``); naming more evals comes with the
 merchant eval API.
 """
@@ -62,6 +63,7 @@ def get_enabled_evaluations_query(template_id: str) -> Tuple[str, List[Any]]:
         FROM evaluation_config
         WHERE template_id = $1::uuid
           AND enabled
+          AND evaluation_type <> 'GUARDRAIL'
     """
     return query, [template_id]
 
@@ -93,6 +95,7 @@ def has_enabled_evaluations_query(template_id: str) -> Tuple[str, List[Any]]:
             FROM evaluation_config
             WHERE template_id = $1::uuid
               AND enabled
+              AND evaluation_type <> 'GUARDRAIL'
         ) AS enabled
     """
     return query, [template_id]

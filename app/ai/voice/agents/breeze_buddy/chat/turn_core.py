@@ -44,6 +44,7 @@ from app.ai.voice.agents.breeze_buddy.chat.llm.gemini.adapter_patch import (
     ensure_chat_gemini_adapter,
 )
 from app.ai.voice.agents.breeze_buddy.chat.sse import SSEEvent
+from app.ai.voice.agents.breeze_buddy.guardrails.loader import load_turn_guard
 from app.ai.voice.agents.breeze_buddy.llm import get_llm_service
 from app.ai.voice.agents.breeze_buddy.template.cache import get_template_by_id_cached
 from app.ai.voice.agents.breeze_buddy.template.types import TemplateModel
@@ -298,6 +299,7 @@ async def run_chat_turn(
         catalog_version=resolve_session_catalog_version(session.metadata),
         merchant_id=session.merchant_id,
         custom_components=model_renderable(await resolve_custom_components(template)),
+        guard=await load_turn_guard(template=template, session=session),
     )
     async for event in agent.run_turn(
         user_content=user_content,
@@ -395,6 +397,7 @@ async def run_chat_approval_continuation(
         catalog_version=resolve_session_catalog_version(session.metadata),
         merchant_id=session.merchant_id,
         custom_components=model_renderable(await resolve_custom_components(template)),
+        guard=await load_turn_guard(template=template, session=session),
     )
     async for event in agent.run_approval_turn(
         approval=claimed,

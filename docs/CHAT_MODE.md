@@ -507,7 +507,45 @@ In the stateless model there is no separate "cache hit" vs "cache miss" path. Ev
 6. Stream SSE events to the client until `turn_end`.
 7. Release the lock in `finally`.
 
-Per-turn cost (excluding the LLM call itself): ~3 indexed DB reads + 2 INSERTs + pipeline construction. Pipeline construction in chat mode is light — no STT, TTS, VAD, smart-turn, or Daily-room provisioning. Single-digit ms for the build.
+Per-turn cost (excluding the LLM call itself): ~4 indexed DB reads (one is the guardrail config, see 7.5) + 2 INSERTs + pipeline construction. Pipeline construction in chat mode is light — no STT, TTS, VAD, smart-turn, or Daily-room provisioning. Single-digit ms for the build.
+
+### 7.5 Guardrails (sequential mode)
+
+Guardrails check the shopper's message and the assistant's reply against the merchant's rules. Code: `app/ai/voice/agents/breeze_buddy/guardrails/` and `chat/agent/guarded.py`.
+
+**Config.** One `evaluation_config` row per agent, type `GUARDRAIL`, name `guardrail`. The shape is `GuardrailsConfig` (`guardrails/config.py`):
+
+| Field | Meaning |
+|---|---|
+| `execution` | `"sequential"` (the only mode today) |
+| `focus` | Adds `FOCUS_REMINDER` as a system message right before the user message. It never blocks. |
+| `llm` | Optional judge model override, merged like an observer's (`merge_llm_config`) |
+| `input.enabled`, `input.rules`, `input.blocked_reply` | Shopper message check. The rules are the merchant's free text or Markdown. |
+| `output.enabled`, `output.rules`, `output.blocked_reply` | Assistant reply check |
+
+The row is saved with `POST /templates/{id}/evaluations/configuration` and switched with `PATCH /templates/{id}/evaluations/config`. Both follow template access, not admin. Save refuses an `llm.credential_id` the template's tenant may not use, before the row is stored. The save response carries `warnings` from a preflight run (`guardrails/preflight.py`). `turn_core` loads the row on every turn (`guardrails/loader.py`), so a change applies from the next message. A failed read logs `alert=guardrail_config_read_failed` and runs the turn without guardrails. Apply migration 087 before deploying this code. The offline eval queries skip `GUARDRAIL` rows.
+
+**Flow.**
+
+```
+run_turn
+  -> check_input (regex, then judge)   block -> fixed reply, turn ends, not billed
+  -> _guarded(_cycle_loop)
+       each LLM call: tokens held by FullTextGate
+       COMMIT_POINT (before rows are saved or tools run)
+         -> check_output (regex, then judge)
+              allow -> held events released
+              block -> loop closed, fixed reply saved, turn_end ACTIVE (billed)
+```
+
+- **Input.** The full message is checked before the LLM runs, after the credit check. A judge error blocks the message (fail closed) and logs an `alert=guardrail_judge_error` line. On a block, the user row keeps the shopper's text in a `display` block (widget only) and an internal note for the LLM. Internal turns are not checked.
+- **Output.** The full text of each LLM call is checked at its commit point. The cycle loop yields `COMMIT_POINT` only when output checks are on, and the agent never forwards it. Text over 1,000 characters is checked early. The judge also gets recent messages and this turn's tool results, projected with the template's keep-lists, URLs dropped, newest first, up to 8,000 characters (`turn_tool_data`). A judge error releases the text (fail open). On a block, text the shopper already saw but the loop had not saved is saved with the fixed reply, with the turn's UI ops.
+- **UI ops.** `render_ui` ops get the regex only, in `_drain_tool_side_effects` before an op is shown or saved. Secrets are looked for in every string. Card numbers are looked for only in readable text, not in ids or URLs. A hit drops that op. The turn goes on.
+- **Tools.** Tool calls and results are not checked.
+- **Judge.** Like observers: the template's own LLM (`llm_configurations`) with the guard's optional `llm` override, merged by `merge_llm_config`, in the template's tenant. Temperature 0, 128 max tokens, the least thinking the model allows, timeout 3.5 s for input and 2 s for output. Saving or switching on with input checks on needs one answered test call, because input fails closed. `call_llm(require_tool=True)` forces the decision tool (not on Bedrock).
+- **Record.** One `evaluation_result` row per checked turn, written in the background. It holds decisions, layers, reason codes, and judge times. It never holds message text.
+
+With no enabled row, `ChatAgent._guard` is `None`, the cycle loop yields no commit points, and the turn runs as before.
 
 ## 8. Template Layer Changes
 

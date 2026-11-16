@@ -318,6 +318,9 @@ async def _drive_run_chat_turn(monkeypatch, *, internal: bool) -> Dict[str, Any]
     async def _get_llm(_config, pooled=True, accounts=None):
         return object()
 
+    async def _no_guard(**_kwargs):
+        return None
+
     async def _run_turn(self, *, user_content, history, current_node, internal=False):
         calls["agent_internal"] = internal
         return
@@ -331,6 +334,7 @@ async def _drive_run_chat_turn(monkeypatch, *, internal: bool) -> Dict[str, Any]
     monkeypatch.setattr(turn_core, "get_agent_session_state", _get_state)
     monkeypatch.setattr(turn_core, "build_render_template_vars", _render_vars)
     monkeypatch.setattr(turn_core, "get_llm_service", _get_llm)
+    monkeypatch.setattr(turn_core, "load_turn_guard", _no_guard)
     monkeypatch.setattr(ChatAgent, "run_turn", _run_turn)
 
     [

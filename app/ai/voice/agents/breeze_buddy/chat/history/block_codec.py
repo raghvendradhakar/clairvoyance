@@ -66,6 +66,8 @@ from app.core.logger import logger
 # traces, refine_ui hints, eval breadcrumbs tomorrow) rides on the
 # canonical content_blocks pipe without leaking onto the user's screen.
 VISIBILITY_INTERNAL = "internal"
+# The opposite: widget-only, never replayed to the LLM (guardrail-blocked text).
+VISIBILITY_DISPLAY = "display"
 
 # ---------------------------------------------------------------------------
 # Encoding: write side (turn-loop → DB)
@@ -139,6 +141,11 @@ def internal_text_block(text: str) -> Dict[str, Any]:
     memory; widget-facing read paths strip it via [[filter_visible_blocks]].
     """
     return {"type": "text", "text": text, "visibility": VISIBILITY_INTERNAL}
+
+
+def display_text_block(text: str) -> Dict[str, Any]:
+    """A widget-only text block, skipped in LLM replay."""
+    return {"type": "text", "text": text, "visibility": VISIBILITY_DISPLAY}
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +352,7 @@ def _assistant_row_to_openai(blocks: List[Dict[str, Any]]) -> LLMContextMessage:
         btype = block.get("type")
         if btype == "text":
             t = block.get("text")
-            if t:
+            if t and block.get("visibility") != VISIBILITY_DISPLAY:
                 text_parts.append(t)
         elif btype == "tool_use":
             tool_calls.append(
@@ -391,7 +398,7 @@ def _user_row_to_openai(
         btype = block.get("type")
         if btype == "text":
             t = block.get("text")
-            if t:
+            if t and block.get("visibility") != VISIBILITY_DISPLAY:
                 text_parts.append(t)
         elif btype == "tool_result":
             tool_msgs.append(
@@ -419,7 +426,9 @@ def _user_row_to_openai(
 
 
 __all__ = [
+    "VISIBILITY_DISPLAY",
     "VISIBILITY_INTERNAL",
+    "display_text_block",
     "assistant_turn_to_blocks",
     "tool_results_to_user_blocks",
     "plain_text_blocks",

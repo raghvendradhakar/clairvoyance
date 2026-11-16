@@ -27,22 +27,44 @@ async def call_llm(
     system_prompt: str,
     tools: List[FunctionSchema],
     observer_name: str,
+    require_tool: bool = False,
 ) -> ToolCallResult:
     """Dispatch to provider-specific function calling.
 
     Returns (tool_name, tool_args) or (None, None) if no tool call.
+    ``require_tool`` forces a tool call (not on Bedrock); the guardrail
+    judge uses it, observers do not.
     """
     if isinstance(llm_service, BaseOpenAILLMService):
         return await _call_openai(
-            llm_service, transcript_text, system_prompt, tools, observer_name
+            llm_service,
+            transcript_text,
+            system_prompt,
+            tools,
+            observer_name,
+            require_tool,
         )
     if isinstance(llm_service, AnthropicLLMService):
         return await _call_anthropic(
-            llm_service, transcript_text, system_prompt, tools, observer_name
+            llm_service,
+            transcript_text,
+            system_prompt,
+            tools,
+            observer_name,
+            require_tool,
         )
     if isinstance(llm_service, GoogleLLMService):
         return await _call_google(
-            llm_service, transcript_text, system_prompt, tools, observer_name
+            llm_service,
+            transcript_text,
+            system_prompt,
+            tools,
+            observer_name,
+            require_tool,
+        )
+    if require_tool:
+        raise NotImplementedError(
+            f"require_tool is not implemented for {type(llm_service).__name__}"
         )
     if isinstance(llm_service, AWSBedrockLLMService):
         return await _call_bedrock(
@@ -57,12 +79,13 @@ async def _call_openai(
     system_prompt: str,
     tools: List[FunctionSchema],
     observer_name: str,
+    require_tool: bool = False,
 ) -> ToolCallResult:
     """Mirror BaseOpenAILLMService._process_context minus the frame layer."""
     context = LLMContext()
     context.add_message({"role": "user", "content": transcript_text})
     context.set_tools(ToolsSchema(standard_tools=tools))
-    context.set_tool_choice("auto")
+    context.set_tool_choice("required" if require_tool else "auto")
 
     adapter = svc.get_llm_adapter()
     invocation_params = adapter.get_llm_invocation_params(
@@ -93,6 +116,7 @@ async def _call_anthropic(
     system_prompt: str,
     tools: List[FunctionSchema],
     observer_name: str,
+    require_tool: bool = False,
 ) -> ToolCallResult:
     """Mirror AnthropicLLMService._process_context minus the frame layer."""
     context = LLMContext()
@@ -110,7 +134,7 @@ async def _call_anthropic(
         "messages": invocation_params["messages"],
         "system": invocation_params["system"],
         "tools": invocation_params["tools"] or [],
-        "tool_choice": {"type": "auto"},
+        "tool_choice": {"type": "any" if require_tool else "auto"},
         "max_tokens": svc._settings.max_tokens or 256,
         "stream": False,
     }
@@ -130,6 +154,7 @@ async def _call_google(
     system_prompt: str,
     tools: List[FunctionSchema],
     observer_name: str,
+    require_tool: bool = False,
 ) -> ToolCallResult:
     """Mirror GoogleLLMService._process_context minus the frame layer."""
     from google.genai.types import GenerateContentConfig
@@ -147,7 +172,10 @@ async def _call_google(
     generation_params = svc._build_generation_params(
         system_instruction=invocation_params["system_instruction"],
         tools=invocation_params["tools"] or [],
-        tool_config=None,
+        # mode=ANY forces a call, as in chat/llm/gemini/stream.py
+        tool_config=(
+            {"function_calling_config": {"mode": "ANY"}} if require_tool else None
+        ),
     )
     generation_params["max_output_tokens"] = svc._settings.max_tokens
 

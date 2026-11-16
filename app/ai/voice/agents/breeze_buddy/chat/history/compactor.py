@@ -176,14 +176,9 @@ def _project_keep(src: Dict[str, Any], paths: List[str]) -> Dict[str, Any]:
     return out
 
 
-def _project_content(content: Any, paths: List[str]) -> Optional[str]:
-    """Project a tool_result ``content`` string down to the keep-``paths``.
-
-    Returns the compact JSON string of the projection, or ``None`` when the
-    content isn't a JSON object we can project, or the projection came back
-    empty (e.g. the result shape changed) — in which case the caller falls
-    back to the 1-line stub so the block is still bounded.
-    """
+def project_tool_json(content: Any, paths: List[str]) -> Optional[Dict[str, Any]]:
+    """The keep-``paths`` of a JSON-object tool result, or None (not a JSON
+    object, or nothing kept). Also used by the guardrail judge."""
     if not isinstance(content, str):
         return None
     try:
@@ -192,8 +187,19 @@ def _project_content(content: Any, paths: List[str]) -> Optional[str]:
         return None
     if not isinstance(obj, dict):
         return None
-    projected = _project_keep(obj, paths)
-    if not projected:
+    return _project_keep(obj, paths) or None
+
+
+def _project_content(content: Any, paths: List[str]) -> Optional[str]:
+    """Project a tool_result ``content`` string down to the keep-``paths``.
+
+    Returns the compact JSON string of the projection, or ``None`` when the
+    content isn't a JSON object we can project, or the projection came back
+    empty (e.g. the result shape changed) — in which case the caller falls
+    back to the 1-line stub so the block is still bounded.
+    """
+    projected = project_tool_json(content, paths)
+    if projected is None:
         return None
     projected[_PROJECTION_MARKER] = (
         "identity-only view (heavy fields pruned to save context) — "

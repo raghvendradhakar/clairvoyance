@@ -47,6 +47,9 @@ def _patch_common(monkeypatch, *, superseded=None, agent_events=None):
     async def _resolve(session_id, only_expired=False):
         return superseded or []
 
+    async def _no_guard(**_kwargs):
+        return None
+
     class _FakeChatAgent:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -66,6 +69,7 @@ def _patch_common(monkeypatch, *, superseded=None, agent_events=None):
     monkeypatch.setattr(tc, "blocks_to_llm_context_messages", lambda rows: [])
     monkeypatch.setattr(tc, "repair_dangling_tool_uses", lambda h: h)
     monkeypatch.setattr(tc, "ChatAgent", _FakeChatAgent)
+    monkeypatch.setattr(tc, "load_turn_guard", _no_guard)
 
 
 def _active_session():

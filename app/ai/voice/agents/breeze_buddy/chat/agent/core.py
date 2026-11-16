@@ -12,6 +12,7 @@ from app.ai.voice.agents.breeze_buddy.chat.agent.approval import ApprovalTurnMix
 from app.ai.voice.agents.breeze_buddy.chat.agent.context import ContextSeedMixin
 from app.ai.voice.agents.breeze_buddy.chat.agent.cycle import CycleLoopMixin
 from app.ai.voice.agents.breeze_buddy.chat.agent.direct import DirectDispatchMixin
+from app.ai.voice.agents.breeze_buddy.chat.agent.guarded import GuardedTurnMixin
 from app.ai.voice.agents.breeze_buddy.chat.agent.render_ui import RenderUiHandlerMixin
 from app.ai.voice.agents.breeze_buddy.chat.agent.runtime import (  # noqa: F401
     _CHIPS_NUDGE,
@@ -47,6 +48,7 @@ from app.ai.voice.agents.breeze_buddy.chat.ui.render_ui_tool import (
 from app.ai.voice.agents.breeze_buddy.chat.ui.stream import (
     UiStreamExtractor,
 )
+from app.ai.voice.agents.breeze_buddy.guardrails.guard import TurnGuard, turn_tool_data
 from app.ai.voice.agents.breeze_buddy.mcp import (
     MCPPool,
     close_mcp_pool,
@@ -119,6 +121,7 @@ class ChatAgent(
     ContextSeedMixin,
     CycleLoopMixin,
     DirectDispatchMixin,
+    GuardedTurnMixin,
     RenderUiHandlerMixin,
     ToolDispatchMixin,
 ):
@@ -142,8 +145,11 @@ class ChatAgent(
         catalog_version: Optional[str] = None,
         merchant_id: Optional[str] = None,
         custom_components: Optional[Dict[str, "CustomComponentDef"]] = None,
+        guard: Optional[TurnGuard] = None,
     ) -> None:
         self.session_id = session_id
+        # The turn's guardrails (guarded.py), or None.
+        self._guard = guard
         self.template = template
         self.template_vars = template_vars or {}
         self._llm = llm
@@ -425,6 +431,8 @@ class ChatAgent(
             ):
                 yield event
         finally:
+            if self._guard is not None:
+                self._guard.schedule_result_write(self._turn_id)
             if self.aiohttp_session is not None:
                 await self.aiohttp_session.close()
                 self.aiohttp_session = None
@@ -462,6 +470,23 @@ class ChatAgent(
         history: List[Dict[str, Any]],
         current_node: Optional[str],
     ) -> AsyncIterator[SSEEvent]:
+        # Credit gate first (read-only), before the guardrail judge and the LLM.
+        # Internal turns are not billable.
+        credits_ok = self._internal_turn or await self._check_sufficient_credits()
+
+        guard = self._guard
+        if guard is not None:
+            guard.begin_turn(history, user_content)
+            # Input check before the LLM; a block ends the turn, not billed.
+            if credits_ok and guard.input_enabled and not self._internal_turn:
+                verdict = await guard.check_input(user_content)
+                if verdict.blocked:
+                    async for event in self._block_input_turn(
+                        user_content, guard.config.input.blocked_reply
+                    ):
+                        yield event
+                    return
+
         prep = await self._prepare_tools()
         node = self._resolve_node(prep.flow_config, current_node)
 
@@ -494,11 +519,8 @@ class ChatAgent(
                 },
             )
 
-            # Credit gate — internal turns are never customer-billable, so
-            # only the customer-facing branch above is gated. Runs after
-            # the user's message is persisted (so a blocked turn still
-            # leaves a record) and before any LLM call.
-            if not await self._check_sufficient_credits():
+            # Message is saved first, so a no-credit turn still has a record.
+            if not credits_ok:
                 # Shoppers only see a neutral message, so this line is the
                 # signal the OpenObserve alert groups by merchant_id.
                 logger.bind(
@@ -533,8 +555,15 @@ class ChatAgent(
         context = self._seed_context(
             node, history, user_content, prep.global_funcs, kb_message=kb_message
         )
+        turn_start = len(context.get_messages())  # this turn's tool results follow
         billing_scheduled = False
-        async for event in self._cycle_loop(context, node, prep):
+        async for event in self._guarded(
+            self._cycle_loop(context, node, prep),
+            node.get("name"),
+            lambda: turn_tool_data(
+                context.get_messages(), prep.tool_projection, turn_start
+            ),
+        ):
             if (
                 not billing_scheduled
                 and self.merchant_id is not None

@@ -26,6 +26,7 @@ from app.ai.voice.agents.breeze_buddy.chat.agent.runtime import (  # noqa: F401
 from app.ai.voice.agents.breeze_buddy.chat.client_context import (
     render_client_context,
 )
+from app.ai.voice.agents.breeze_buddy.guardrails.prompts import FOCUS_REMINDER
 from app.ai.voice.agents.breeze_buddy.services.knowledge_base import (
     build_kb_system_message,
     build_retrieval_query,
@@ -177,6 +178,9 @@ class ContextSeedMixin:
             messages.append({"role": "system", "content": system_block})
         if kb_message is not None and kb_message.placement == "tail":
             messages.append(kb_message.message)
+        if self._guard is not None and self._guard.config.focus:
+            # Guardrail Focus: after history, outside the cached prefix.
+            messages.append({"role": "system", "content": FOCUS_REMINDER})
         messages.append({"role": "user", "content": user_text})
         return LLMContext(
             messages=cast(List[LLMContextMessage], messages),

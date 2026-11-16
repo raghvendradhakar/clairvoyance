@@ -77,6 +77,7 @@ from app.ai.voice.agents.breeze_buddy.chat.ui.stream import (
     summarize_ui_ops,
     ui_op_dropped_event,
 )
+from app.ai.voice.agents.breeze_buddy.guardrails.guard import COMMIT_POINT
 from app.ai.voice.agents.breeze_buddy.template.session_state import (
     _is_tool_success,
     apply_state_reducers,
@@ -352,6 +353,19 @@ class CycleLoopMixin:
             cycle_answers = not any(
                 call.function_name not in _HARNESS_TOOLS for call in tool_calls
             )
+            if self._guard is not None and self._guard.output_enabled:
+                # Guardrail commit point: the output check runs before the code
+                # below saves text or runs tools. Flush the UI carry so it is
+                # checked too. ``text_saved`` is False for answer prose, which
+                # waits for the final row.
+                for out in self._ui_extractor.flush():
+                    if isinstance(out, TextOut):
+                        yield SSEEvent(
+                            event="assistant_token", data={"delta": out.value}
+                        )
+                yield SSEEvent(
+                    event=COMMIT_POINT, data={"text_saved": not cycle_answers}
+                )
             # Narration belongs to the gate row this cycle is about to
             # write (below), IN FRONT of the tool_use it preceded — which
             # is where it actually happened. Accumulating it here too
@@ -1063,6 +1077,9 @@ class CycleLoopMixin:
                 yield SSEEvent(event="assistant_token", data={"delta": out.value})
             # JsonlOpLine items from flush() shouldn't happen — defensive
             # path drops them (flush only ever yields TextOut today).
+        if self._guard is not None and self._guard.output_enabled:
+            # Guardrail commit point before the final row is saved.
+            yield SSEEvent(event=COMMIT_POINT)
 
         # Reconstruct prose-only history (strips every
         # <ui_stream>…</ui_stream>) so saved messages never carry SpecStream
@@ -1183,6 +1200,16 @@ class CycleLoopMixin:
             events.append(self._pending_tool_sse.pop(0))
         while self._pending_ui_ops:
             op = self._pending_ui_ops.pop(0)
+            if (
+                self._guard is not None
+                and self._guard.output_enabled
+                and self._guard.ui_op_blocked(op)
+            ):
+                # Guardrail regex hit: drop this op only.
+                logger.warning(
+                    f"ChatAgent {self.session_id}: guardrail dropped a ui op"
+                )
+                continue
             self._unpersisted_tool_ui_ops.append(op)
             events.append(SSEEvent(event="ui_op", data={"op": op}))
         return events

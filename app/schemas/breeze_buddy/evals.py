@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 class EvaluationType(str, Enum):
     TOPIC = "TOPIC"
     CONVERSATION_EVALS = "CONVERSATION_EVALS"
+    # live chat guardrail, runs on the turn
+    GUARDRAIL = "GUARDRAIL"
 
 
 class EvaluationEnableRequest(BaseModel):
@@ -23,10 +25,12 @@ class EvaluationConfigResponse(BaseModel):
     template_id: UUID
     evaluation_type: EvaluationType
     enabled: bool
-    # admin-only; None for other roles
+    # admin-only (GUARDRAIL: anyone with template access); None otherwise
     configuration: Optional[Dict[str, Any]] = None
     # the TOPIC catalog (a separate column); empty for other types
     topics: List[str] = Field(default_factory=list)
+    # GUARDRAIL save only: preflight warnings
+    warnings: List[str] = Field(default_factory=list)
 
 
 class SaveEvaluationConfigurationRequest(BaseModel):
