@@ -295,3 +295,82 @@ def test_etag_changes_when_the_appearance_changes(
     after = _get(client).headers["ETag"]
     assert before != after
     assert _get(client, **{"If-None-Match": before}).status_code == 200
+
+
+# --- key path: a direct embed asks by its tenant key -----------------------
+
+
+@pytest.fixture()
+def by_key(monkeypatch) -> AsyncMock:
+    mock = AsyncMock(return_value=_cfg())
+    monkeypatch.setattr(storefront, "get_widget_config_by_public_key", mock)
+    return mock
+
+
+def _get_by_key(client: TestClient, key: str = "public-key-123", **headers: str):
+    return client.get(
+        "/widget/storefront-config",
+        params={"key": key},
+        headers={"Origin": STOREFRONT_ORIGIN, **headers},
+    )
+
+
+def test_key_resolves_to_config_without_a_domain(
+    client: TestClient, lookup: AsyncMock, by_key: AsyncMock
+) -> None:
+    response = _get_by_key(client)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True
+    assert body["tenant"] == "public-key-123"
+    assert body["merchant_domain"] is None
+    assert response.headers["Cache-Control"] == "private, max-age=60"
+    assert body["appearance"]["header_title"] == "Zodiac Assist"
+    by_key.assert_awaited_once_with("public-key-123")
+    lookup.assert_not_awaited()
+
+
+def test_unknown_or_inactive_key_is_not_enabled_200(
+    client: TestClient, by_key: AsyncMock
+) -> None:
+    by_key.return_value = None
+    unknown = _get_by_key(client)
+    by_key.return_value = _cfg(active=False)
+    inactive = _get_by_key(client)
+    for response in (unknown, inactive):
+        assert response.status_code == 200
+        assert response.json()["enabled"] is False
+
+
+def test_key_from_a_foreign_origin_is_403(
+    client: TestClient, by_key: AsyncMock
+) -> None:
+    assert _get_by_key(client, Origin="https://evil.example").status_code == 403
+
+
+def test_both_or_neither_selector_is_400_and_never_hits_db(
+    client: TestClient, lookup: AsyncMock, by_key: AsyncMock
+) -> None:
+    both = client.get(
+        "/widget/storefront-config",
+        params={"merchant_domain": MERCHANT_DOMAIN, "key": "public-key-123"},
+        headers={"Origin": STOREFRONT_ORIGIN},
+    )
+    neither = client.get(
+        "/widget/storefront-config", headers={"Origin": STOREFRONT_ORIGIN}
+    )
+    assert both.status_code == 400
+    assert neither.status_code == 400
+    lookup.assert_not_awaited()
+    by_key.assert_not_awaited()
+
+
+def test_key_revalidation_is_304_and_skips_the_per_widget_limit(
+    client: TestClient, by_key: AsyncMock, monkeypatch
+) -> None:
+    etag = _get_by_key(client).headers["ETag"]
+    limiter = AsyncMock()
+    monkeypatch.setattr(storefront, "enforce_widget_ip_limit", limiter)
+    revalidated = _get_by_key(client, **{"If-None-Match": etag})
+    assert revalidated.status_code == 304
+    limiter.assert_not_awaited()

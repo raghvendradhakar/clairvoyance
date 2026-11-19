@@ -2,10 +2,10 @@
 
 The theme-extension loader on a merchant's storefront calls this on page
 view to learn whether the widget is enabled for the merchant and how to dress
-it. It is the only widget endpoint keyed by the MERCHANT'S STOREFRONT
-DOMAIN rather than by ``public_widget_key`` — the loader knows nothing
-but the domain it runs on; the key is part of this endpoint's ANSWER,
-not its input.
+it. The loader knows nothing but the domain it runs on, so it asks by
+``merchant_domain`` and the key is part of the ANSWER. A direct embed (a
+page that is not a Shopify storefront) already has its key and asks by
+``key`` instead, so its look comes from the console, not its snippet.
 
 Trust model mirrors ``POST /widget/session``: anonymous, but the caller's
 Origin must be in the row's ``allowed_origins`` and per-IP rate limits
@@ -34,6 +34,7 @@ from app.api.routers.breeze_buddy.widget_common import (
 )
 from app.core.logger import logger
 from app.database.accessor.breeze_buddy.widget_config import (
+    get_widget_config_by_public_key,
     get_widget_config_by_reseller_merchant,
 )
 from app.schemas.breeze_buddy.widget_config import StorefrontWidgetConfigResponse
@@ -113,16 +114,33 @@ _RESPONSE_HEADERS = {
     "Access-Control-Expose-Headers": "ETag",
 }
 
+# A direct embed (key path) keeps no copy of its own, so the browser cache is
+# its copy: reused for the same minute, then revalidated with the ETag.
+# ``private`` keeps it out of shared caches; the answer depends on the Origin.
+_KEY_RESPONSE_HEADERS = {
+    **_RESPONSE_HEADERS,
+    "Cache-Control": f"private, max-age={_CACHE_TTL_SECONDS}",
+}
+
 
 async def storefront_widget_config_handler(
-    request: Request, merchant_domain: str
+    request: Request, merchant_domain: Optional[str], key: Optional[str] = None
 ) -> Response:
-    try:
-        normalized_domain = normalize_merchant_domain(merchant_domain)
-    except ValueError as exc:
+    if bool(merchant_domain) == bool(key):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-        ) from exc
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Send exactly one of merchant_domain or key",
+        )
+    normalized_domain = None
+    if merchant_domain:
+        try:
+            normalized_domain = normalize_merchant_domain(merchant_domain)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+    response_headers = _KEY_RESPONSE_HEADERS if key else _RESPONSE_HEADERS
 
     # Before any DB read — see _PROBE_LIMIT_PER_IP_HOUR.
     await _enforce_probe_ip_limit(request)
@@ -132,13 +150,21 @@ async def storefront_widget_config_handler(
     # then the breeze-buddy tab's BB_SHOPIFY tenant). First ACTIVE config
     # wins — an inactive standalone tenant never shadows a live one.
     cfg = None
-    for reseller_id, merchant_id in assist_tenant_candidates(normalized_domain):
-        candidate = await get_widget_config_by_reseller_merchant(
-            reseller_id, merchant_id
-        )
+    if key:
+        # A direct embed knows its key, not a storefront domain. Same checks
+        # and answers as the domain path below; the row's merchant_id is
+        # never echoed back.
+        candidate = await get_widget_config_by_public_key(key)
         if candidate is not None and candidate.active:
             cfg = candidate
-            break
+    elif normalized_domain:
+        for reseller_id, merchant_id in assist_tenant_candidates(normalized_domain):
+            candidate = await get_widget_config_by_reseller_merchant(
+                reseller_id, merchant_id
+            )
+            if candidate is not None and candidate.active:
+                cfg = candidate
+                break
     if cfg is None:
         # Unknown and inactive are indistinguishable — same posture as the
         # public-key path in widget_common.resolve_widget_config_for_request.
@@ -147,6 +173,7 @@ async def storefront_widget_config_handler(
         # out of the load balancer's 4xx ratio.
         logger.info(
             f"widget: no active storefront config for merchant_domain={normalized_domain}"
+            + (f" key_prefix={key[:6]!r}" if key else "")
         )
         return JSONResponse(
             content={
@@ -154,7 +181,7 @@ async def storefront_widget_config_handler(
                 "merchant_domain": normalized_domain,
                 "cache_ttl_seconds": _CACHE_TTL_SECONDS,
             },
-            headers=_RESPONSE_HEADERS,
+            headers=response_headers,
         )
 
     enforce_widget_origin(request=request, cfg=cfg)
@@ -170,7 +197,7 @@ async def storefront_widget_config_handler(
         cache_ttl_seconds=_CACHE_TTL_SECONDS,
     )
     etag = _etag_of(body)
-    headers = {**_RESPONSE_HEADERS, "ETag": etag}
+    headers = {**response_headers, "ETag": etag}
 
     # A revalidation of an unchanged config is answered here, before the
     # per-widget limiter: the loader revalidates on every page view, and that

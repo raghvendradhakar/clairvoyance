@@ -34,6 +34,7 @@ from fastapi import (
     File,
     Form,
     Path,
+    Query,
     Request,
     Response,
     UploadFile,
@@ -175,16 +176,20 @@ async def widget_end_preflight(session_id: str) -> Response:
 @router.get(
     "/storefront-config",
     response_model=StorefrontWidgetConfigResponse,
-    summary="Resolve a merchant's storefront domain to its Assist widget config + appearance",
+    summary="Resolve a storefront domain or a widget key to its Assist widget config + appearance",
 )
 async def get_storefront_widget_config(
-    request: Request, merchant_domain: str
+    request: Request,
+    merchant_domain: Optional[str] = None,
+    key: Annotated[Optional[str], Query(min_length=10)] = None,
 ) -> Response:
     """200 with the config + ``ETag``; 304 (no body) when ``If-None-Match``
-    carries the current tag; 200 ``{"enabled": false}`` when the shop has no
-    active config. All say ``Cache-Control: no-cache``: the loader keeps its
-    own short copy and revalidates."""
-    return await storefront_widget_config_handler(request, merchant_domain)
+    carries the current tag; 200 ``{"enabled": false}`` when the shop or key
+    has no active config. The domain path says ``Cache-Control: no-cache``:
+    the loader keeps its own short copy and revalidates. The key path lets
+    the browser reuse the answer for a minute. Send exactly one of
+    ``merchant_domain`` (theme loader) or ``key`` (a direct embed's tenant)."""
+    return await storefront_widget_config_handler(request, merchant_domain, key)
 
 
 @router.post(

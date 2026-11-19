@@ -156,7 +156,8 @@ class StorefrontWidgetConfigResponse(BaseModel):
 
     enabled: bool = True
     tenant: str
-    merchant_domain: str
+    # None on the key path (a direct embed has no storefront domain).
+    merchant_domain: Optional[str] = None
     appearance: Dict[str, Any] = Field(default_factory=dict)
     settings_revision: Optional[str] = Field(
         None,
